@@ -1,0 +1,24 @@
+fastapi==0.111.0
+uvicorn[standard]==0.29.0
+python-multipart==0.0.9
+pydantic==2.7.1
+pydantic-settings==2.3.0
+python-dotenv==1.0.1
+
+# Document parsing
+PyMuPDF==1.24.4
+pdfplumber==0.11.1
+easyocr==1.7.1
+
+# LLM + Embeddings
+groq
+sentence-transformers==2.7.0
+
+# Vector store
+chromadb==0.5.3
+
+# Security / rate limiting
+slowapi==0.1.9
+
+# Sample doc generation
+reportlab==4.2.0

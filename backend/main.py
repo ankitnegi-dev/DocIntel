@@ -1,14 +1,13 @@
 """
 Document Intelligence + Agentic RAG — FastAPI Backend
 ======================================================
-Startup: auto-indexes sample_docs/ if not already indexed.
 Security: CORS, rate limiting, MIME validation, hashed filenames.
+Note: Auto-indexing disabled at startup to stay within Render free tier memory limits.
+      Upload sample docs manually via the /upload page.
 """
 import os
 import sys
 import logging
-import asyncio
-from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -17,7 +16,6 @@ load_dotenv()
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
@@ -46,10 +44,6 @@ app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # CORS
-allowed_origins = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(",")
-frontend_url = os.getenv("FRONTEND_URL", "")
-if frontend_url:
-    allowed_origins.append(frontend_url)
 allowed_origins = ["*"]
 
 app.add_middleware(
@@ -89,60 +83,8 @@ async def health():
     }
 
 
-# --- Startup: auto-index sample documents only ---
+# --- Startup ---
 @app.on_event("startup")
 async def startup_event():
     logger.info("Application starting up...")
-
-    await _auto_index_samples()
-
-    # Build BM25 index from existing ChromaDB data
-    try:
-        from services.vector_store import get_all_chunks
-        from services.bm25_index import bm25_index
-        chunks = get_all_chunks()
-        if chunks:
-            bm25_index.build(chunks)
-            logger.info(f"BM25 index warmed up with {len(chunks)} chunks")
-    except Exception as e:
-        logger.warning(f"BM25 warmup failed (non-fatal): {e}")
-
-
-async def _auto_index_samples():
-    """Index sample_docs/ directory if documents haven't been indexed yet."""
-    sample_dir = Path(__file__).parent / "sample_docs"
-    if not sample_dir.exists():
-        logger.info("No sample_docs directory found, skipping auto-indexing")
-        return
-
-    metadata_dir = Path(__file__).parent / "storage" / "metadata"
-    metadata_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-
-    from routers.upload import _process_document, UPLOADS_DIR
-    import hashlib
-
-    for sample_file in sample_dir.iterdir():
-        if sample_file.suffix.lower() not in {".pdf", ".txt"}:
-            continue
-
-        try:
-            content = sample_file.read_bytes()
-            doc_hash = hashlib.sha256(content).hexdigest()
-            meta_path = metadata_dir / f"{doc_hash}.json"
-
-            if meta_path.exists():
-                import json
-                existing = json.loads(meta_path.read_text())
-                if existing.get("status") == "indexed":
-                    logger.info(f"Sample already indexed: {sample_file.name}")
-                    continue
-
-            ext = sample_file.suffix.lower()
-            dest_path = UPLOADS_DIR / f"{doc_hash}{ext}"
-            dest_path.write_bytes(content)
-
-            logger.info(f"Auto-indexing sample: {sample_file.name}")
-            await _process_document(doc_hash, dest_path, sample_file.name)
-
-        except Exception as e:
-            logger.error(f"Failed to auto-index {sample_file.name}: {e}")
+    logger.info("Startup complete — ready to serve requests.")

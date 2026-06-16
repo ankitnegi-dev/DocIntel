@@ -21,7 +21,7 @@ from fastapi.responses import JSONResponse
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
-from limiter import limiter  # shared limiter module (avoids circular imports)
+from limiter import limiter
 from routers import upload, chat, documents
 
 # Configure logging
@@ -45,19 +45,17 @@ app = FastAPI(
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-# CORS — restrict to frontend origin in production
+# CORS
 allowed_origins = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(",")
-# Also allow the deployed frontend URL if set
 frontend_url = os.getenv("FRONTEND_URL", "")
 if frontend_url:
     allowed_origins.append(frontend_url)
-# For demo: allow all origins
 allowed_origins = ["*"]
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
-    allow_credentials=False,  # Must be False when origins=["*"]
+    allow_credentials=False,
     allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
@@ -82,7 +80,6 @@ app.include_router(documents.router, tags=["Documents"])
 # --- Health check ---
 @app.get("/health")
 async def health():
-    """Health check endpoint — also warms up on first request."""
     from services.vector_store import get_document_count
     doc_count = get_document_count()
     return {
@@ -92,22 +89,11 @@ async def health():
     }
 
 
-# --- Startup: auto-index sample documents ---
+# --- Startup: auto-index sample documents only ---
 @app.on_event("startup")
 async def startup_event():
-    """Auto-index sample documents on first startup."""
     logger.info("Application starting up...")
 
-    # Warm up embedder model
-    try:
-        from services.embedder import _get_model
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, _get_model)
-        logger.info("Embedder model warmed up")
-    except Exception as e:
-        logger.warning(f"Embedder warmup failed: {e}")
-
-    # Auto-index sample documents
     await _auto_index_samples()
 
     # Build BM25 index from existing ChromaDB data
@@ -144,7 +130,6 @@ async def _auto_index_samples():
             doc_hash = hashlib.sha256(content).hexdigest()
             meta_path = metadata_dir / f"{doc_hash}.json"
 
-            # Skip if already indexed
             if meta_path.exists():
                 import json
                 existing = json.loads(meta_path.read_text())
@@ -152,7 +137,6 @@ async def _auto_index_samples():
                     logger.info(f"Sample already indexed: {sample_file.name}")
                     continue
 
-            # Copy to uploads dir
             ext = sample_file.suffix.lower()
             dest_path = UPLOADS_DIR / f"{doc_hash}{ext}"
             dest_path.write_bytes(content)

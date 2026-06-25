@@ -12,9 +12,10 @@ import asyncio
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query, BackgroundTasks
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 
 from services.document_repo import get_document, list_documents, upsert_document
+from services import object_storage
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -22,6 +23,9 @@ router = APIRouter()
 STORAGE_DIR = Path(__file__).parent.parent / "storage"
 PAGES_DIR = STORAGE_DIR / "pages"
 UPLOADS_DIR = STORAGE_DIR / "uploads"
+
+ORIGINALS_PREFIX = "originals/"
+PAGES_PREFIX = "pages/"
 
 
 def _valid_doc_id(doc_id: str) -> bool:
@@ -58,17 +62,38 @@ async def get_page_image(
     """
     Serve a rendered page PNG.
     Images are ONLY served through this endpoint - never from direct disk path.
+    Tries object storage (B2) first, falls back to local disk for any files
+    that were processed before the object-storage migration.
     Validates doc_id to prevent path traversal.
     """
     if not _valid_doc_id(doc_id):
         raise HTTPException(status_code=400, detail="Invalid document ID")
 
-    image_path = PAGES_DIR / f"{doc_id}_{page}.png"
+    key = f"{PAGES_PREFIX}{doc_id}_{page}.png"
 
+    # Try object storage first
+    try:
+        data = object_storage.download_bytes(key)
+        if data:
+            return Response(
+                content=data,
+                media_type="image/png",
+                headers={
+                    "Cache-Control": "private, max-age=3600",
+                    "X-Content-Type-Options": "nosniff",
+                }
+            )
+    except Exception as e:
+        logger.warning(f"Object storage lookup failed for {key}: {e}")
+
+    # Fallback: local disk (legacy files not yet migrated)
+    image_path = PAGES_DIR / f"{doc_id}_{page}.png"
     try:
         resolved = image_path.resolve()
         if not str(resolved).startswith(str(PAGES_DIR.resolve())):
             raise HTTPException(status_code=403, detail="Access denied")
+    except HTTPException:
+        raise
     except Exception:
         raise HTTPException(status_code=403, detail="Access denied")
 
@@ -87,7 +112,7 @@ async def get_page_image(
 
 @router.delete("/documents/{doc_id}")
 async def delete_document(doc_id: str):
-    """Remove a document and all its associated data."""
+    """Remove a document and all its associated data (vectors, Postgres row, files)."""
     if not _valid_doc_id(doc_id):
         raise HTTPException(status_code=400, detail="Invalid document ID")
 
@@ -107,11 +132,16 @@ async def delete_document(doc_id: str):
     finally:
         session.close()
 
-    # Remove page images
+    # Remove from object storage (pages + original)
+    try:
+        object_storage.delete_objects_with_prefix(f"{PAGES_PREFIX}{doc_id}_")
+        object_storage.delete_objects_with_prefix(f"{ORIGINALS_PREFIX}{doc_id}")
+    except Exception as e:
+        logger.warning(f"Object storage cleanup failed for {doc_id}: {e}")
+
+    # Remove any leftover local files (legacy/in-flight)
     for img_file in PAGES_DIR.glob(f"{doc_id}_*.png"):
         img_file.unlink()
-
-    # Remove uploaded file
     for up_file in UPLOADS_DIR.glob(f"{doc_id}.*"):
         up_file.unlink()
 
@@ -122,8 +152,9 @@ async def delete_document(doc_id: str):
 async def reindex_document(doc_id: str, background_tasks: BackgroundTasks):
     """
     Re-process and re-index an existing document.
-    Reads the original stored file, deletes old vectors, and runs the full
-    parse -> classify -> embed pipeline again in the background.
+    Downloads the original file from object storage (or local disk fallback),
+    deletes old vectors, and runs the full parse -> classify -> embed -> persist
+    pipeline again in the background.
     """
     if not _valid_doc_id(doc_id):
         raise HTTPException(status_code=400, detail="Invalid document ID")
@@ -133,24 +164,36 @@ async def reindex_document(doc_id: str, background_tasks: BackgroundTasks):
         raise HTTPException(status_code=404, detail="Document not found")
 
     original_filename = meta.get("original_filename", "unknown")
+    file_ext = meta.get("file_ext") or Path(original_filename).suffix.lower() or ".pdf"
 
-    file_path = None
-    for ext in [".pdf", ".txt", ".png", ".jpg", ".jpeg"]:
-        candidate = UPLOADS_DIR / f"{doc_id}{ext}"
-        if candidate.exists():
-            file_path = candidate
-            break
+    # Locate the original file: object storage first, then local disk fallback
+    file_path = UPLOADS_DIR / f"{doc_id}{file_ext}"
+    found = False
 
-    if file_path is None:
+    if not file_path.exists():
+        key = f"{ORIGINALS_PREFIX}{doc_id}{file_ext}"
+        try:
+            data = object_storage.download_bytes(key)
+            if data:
+                UPLOADS_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+                file_path.write_bytes(data)
+                found = True
+        except Exception as e:
+            logger.warning(f"Could not fetch original from object storage for reindex: {e}")
+    else:
+        found = True
+
+    if not found:
         raise HTTPException(
             status_code=404,
-            detail="Original file not found on disk. Cannot reindex."
+            detail="Original file not found in object storage or on disk. Cannot reindex."
         )
 
     async def _do_reindex():
         from services.parser import parse_document
         from services.classifier import classify_document
         from services.vector_store import index_document, delete_document as vs_delete
+        from routers.upload import _persist_to_object_storage
 
         try:
             vs_delete(doc_id)
@@ -172,11 +215,16 @@ async def reindex_document(doc_id: str, background_tasks: BackgroundTasks):
             final_status = "indexed" if chunk_count > 0 else "error"
             error_msg = None if chunk_count > 0 else "No extractable text found"
 
+            if chunk_count > 0:
+                await asyncio.get_event_loop().run_in_executor(
+                    None, _persist_to_object_storage, doc_id, file_path, len(pages)
+                )
+
             upsert_document(
                 doc_id=doc_id,
                 filename=original_filename,
-                file_ext=Path(original_filename).suffix.lower(),
-                file_size=file_path.stat().st_size,
+                file_ext=file_ext,
+                file_size=file_path.stat().st_size if file_path.exists() else 0,
                 status=final_status,
                 page_count=len(pages),
                 classification=classification,
@@ -190,7 +238,7 @@ async def reindex_document(doc_id: str, background_tasks: BackgroundTasks):
             upsert_document(
                 doc_id=doc_id,
                 filename=original_filename,
-                file_ext=Path(original_filename).suffix.lower(),
+                file_ext=file_ext,
                 file_size=file_path.stat().st_size if file_path.exists() else 0,
                 status="error",
                 error_message=str(e),

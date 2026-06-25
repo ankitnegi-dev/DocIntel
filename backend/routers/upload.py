@@ -4,6 +4,12 @@ Upload Router
 POST /upload   - Upload and process a single document
 GET  /status/{doc_id} - Get processing status for a document
 POST /bulk-upload - Upload multiple documents
+
+File persistence model:
+- Local UPLOADS_DIR / PAGES_DIR are working scratch space (parser needs local paths).
+- After successful processing, the original file and all rendered page images
+  are uploaded to object storage (Backblaze B2), then deleted from local disk.
+- This keeps files durable across redeploys without requiring parser.py changes.
 """
 import os
 import hashlib
@@ -23,14 +29,17 @@ from fastapi.responses import JSONResponse
 from limiter import limiter
 from models.document import DocumentResponse, ProcessingStatus
 from services.document_repo import get_document, upsert_document, list_documents
+from services import object_storage
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
 STORAGE_DIR = Path(__file__).parent.parent / "storage"
 UPLOADS_DIR = STORAGE_DIR / "uploads"
+PAGES_DIR = STORAGE_DIR / "pages"
 
 UPLOADS_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+PAGES_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
 
 # Security: allowed file types (extension + MIME)
 ALLOWED_EXTENSIONS = {".pdf", ".txt", ".png", ".jpg", ".jpeg"}
@@ -42,6 +51,10 @@ ALLOWED_MIME_TYPES = {
     "image/jpg",
 }
 MAX_FILE_SIZE = int(os.getenv("MAX_FILE_SIZE_MB", "20")) * 1024 * 1024  # 20MB default
+
+# Object storage key prefixes
+ORIGINALS_PREFIX = "originals/"
+PAGES_PREFIX = "pages/"
 
 # In-memory processing status store
 _processing_status: dict[str, ProcessingStatus] = {}
@@ -116,9 +129,39 @@ def _validate_file(file: UploadFile, content: bytes) -> None:
             # Log but don't block - warn only for accessibility
 
 
+def _persist_to_object_storage(doc_id: str, file_path: Path, page_count: int) -> None:
+    """
+    Upload the original file and all rendered page images to object storage,
+    then remove the local copies to free disk space.
+    Best-effort: logs but does not raise on failure, since the document is
+    already indexed and usable even if this durability step fails.
+    """
+    try:
+        # Upload original file
+        if file_path.exists():
+            content = file_path.read_bytes()
+            key = f"{ORIGINALS_PREFIX}{file_path.name}"
+            object_storage.upload_bytes(key, content)
+            file_path.unlink()
+    except Exception as e:
+        logger.warning(f"Failed to persist original file for {doc_id} to object storage: {e}")
+
+    for page_num in range(1, page_count + 1):
+        local_image = PAGES_DIR / f"{doc_id}_{page_num}.png"
+        if not local_image.exists():
+            continue
+        try:
+            content = local_image.read_bytes()
+            key = f"{PAGES_PREFIX}{doc_id}_{page_num}.png"
+            object_storage.upload_bytes(key, content, content_type="image/png")
+            local_image.unlink()
+        except Exception as e:
+            logger.warning(f"Failed to persist page image {page_num} for {doc_id}: {e}")
+
+
 async def _process_document(doc_id: str, file_path: Path, original_filename: str):
     """
-    Background task: parse -> classify -> index a document.
+    Background task: parse -> classify -> index -> persist a document.
     Updates processing status throughout.
     """
     from services.parser import parse_document
@@ -150,12 +193,19 @@ async def _process_document(doc_id: str, file_path: Path, original_filename: str
         final_status = "indexed" if chunk_count > 0 else "error"
         error_msg = None if chunk_count > 0 else "No extractable text found (scanned PDF without OCR support)"
 
+        # --- PERSIST FILES TO OBJECT STORAGE ---
+        if chunk_count > 0:
+            _update_status(doc_id, "indexing", 90, "Persisting files to object storage...")
+            await asyncio.get_event_loop().run_in_executor(
+                None, _persist_to_object_storage, doc_id, file_path, len(pages)
+            )
+
         # --- SAVE METADATA (Postgres) ---
         upsert_document(
             doc_id=doc_id,
             filename=original_filename,
             file_ext=Path(original_filename).suffix.lower(),
-            file_size=file_path.stat().st_size,
+            file_size=file_path.stat().st_size if file_path.exists() else 0,
             status=final_status,
             page_count=len(pages),
             classification=classification,
@@ -227,7 +277,7 @@ async def upload_document(
             "message": "Document already indexed"
         }
 
-    # Save file to disk (hashed filename - never original name)
+    # Save file to local scratch disk (hashed filename - never original name)
     file_path.write_bytes(content)
     os.chmod(file_path, 0o600)  # Owner read/write only
 

@@ -7,6 +7,7 @@
 ![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript&logoColor=white)
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?logo=postgresql&logoColor=white)
 ![ChromaDB](https://img.shields.io/badge/Vector%20DB-Chroma%20Cloud-6E56CF)
+![Backblaze](https://img.shields.io/badge/Object%20Storage-Backblaze%20B2-E21E29?logo=backblaze&logoColor=white)
 ![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)
 ![Render](https://img.shields.io/badge/Backend-Render-46E3B7?logo=render&logoColor=white)
 ![Vercel](https://img.shields.io/badge/Frontend-Vercel-000000?logo=vercel&logoColor=white)
@@ -31,9 +32,10 @@ This repository gives you a complete pipeline:
 - Next.js 14 frontend with upload, chat, and document preview workflows
 - **Chroma Cloud** vector store (persistent, not tied to a single server's disk) plus BM25 keyword retrieval, fused via Reciprocal Rank Fusion
 - **Postgres-backed metadata** - document status, classification, and chunk counts persist independently of any single server instance
+- **Backblaze B2 object storage** - uploaded originals and rendered page images persist independently of any single server's local disk, surviving redeploys
 - **Dockerized** backend + frontend with `docker-compose` for one-command local orchestration matching production architecture
 - Streaming (SSE) and non-streaming chat endpoints
-- Deployed end-to-end: FastAPI on Render, Next.js on Vercel, vectors on Chroma Cloud, metadata on Render Postgres
+- Deployed end-to-end: FastAPI on Render, Next.js on Vercel, vectors on Chroma Cloud, metadata on Render Postgres, files on Backblaze B2
 
 ## Demo and Screenshots
 
@@ -66,6 +68,7 @@ flowchart LR
     F --> G[Chroma Cloud]
     F --> H[BM25 Index]
     C --> P[(Postgres — Render)]
+    C --> S[(Backblaze B2)]
     A --> I[Chat API]
     I --> J[RAG Agent]
     J --> G
@@ -81,7 +84,7 @@ flowchart LR
 | Backend | Docker container (`localhost:8000`) | Render Web Service |
 | Metadata DB | Docker Postgres container | Render Managed Postgres |
 | Vector store | Chroma Cloud (shared with prod) | Chroma Cloud |
-| File storage | Local volume | Local disk on Render instance (ephemeral - see Roadmap) |
+| File storage | Backblaze B2 (shared with prod) | Backblaze B2 |
 
 ## Repository Layout
 
@@ -101,11 +104,14 @@ backend/
     embedder.py              ONNX embedding function (Chroma's built-in MiniLM)
     vector_store.py          Chroma Cloud client + hybrid search
     document_repo.py         Postgres data-access layer (replaces old JSON metadata)
+    object_storage.py        Backblaze B2 (S3-compatible) client for files + page images
     rag_agent.py             Retrieval orchestration + answer synthesis
     bm25_index.py            In-memory BM25 keyword index
     reranker.py              Cross-encoder re-ranking
   sample_docs/             Sample documents for demoing
-  storage/                 Uploaded files, rendered page images (local disk)
+  storage/                 Local scratch space during processing (uploaded files and
+                           rendered page images are persisted to Backblaze B2 after
+                           successful indexing, then removed from local disk)
 frontend/
   Dockerfile               Frontend container build
   package.json             Next scripts and deps
@@ -121,9 +127,10 @@ docker-compose.yml         Orchestrates backend + frontend + postgres locally
 - **Parsing:** PyMuPDF, pdfplumber (table extraction)
 - **Retrieval:** Chroma Cloud (ONNX MiniLM embeddings), BM25, cross-encoder re-ranking
 - **Metadata storage:** PostgreSQL (Render Managed Postgres in prod, Dockerized Postgres locally)
+- **File storage:** Backblaze B2 (S3-compatible, via `boto3`)
 - **LLM:** Groq (`groq` SDK) - llama-3.3-70b-versatile (RAG) + llama-3.1-8b-instant (classification)
 - **Frontend:** Next.js 14, React 18, TypeScript, Tailwind CSS
-- **Infra:** Docker, docker-compose, Render, Vercel, Chroma Cloud
+- **Infra:** Docker, docker-compose, Render, Vercel, Chroma Cloud, Backblaze B2
 
 ## Prerequisites
 
@@ -131,6 +138,7 @@ docker-compose.yml         Orchestrates backend + frontend + postgres locally
 - Or, for a non-Docker setup: Python 3.11+, Node.js 18+
 - Groq API key (free at https://console.groq.com)
 - Chroma Cloud account (free tier - https://trychroma.com)
+- Backblaze B2 account (free tier, 10GB - https://www.backblaze.com/sign-up/cloud-storage)
 
 ## Quickstart (Docker - recommended)
 
@@ -148,6 +156,10 @@ GROQ_API_KEY=your_groq_api_key_here
 CHROMA_API_KEY=your_chroma_cloud_api_key
 CHROMA_TENANT=your_chroma_tenant_id
 CHROMA_DATABASE=your_chroma_database_name
+B2_ENDPOINT_URL=https://s3.<region>.backblazeb2.com
+B2_ACCESS_KEY_ID=your_b2_key_id
+B2_SECRET_ACCESS_KEY=your_b2_application_key
+B2_BUCKET_NAME=your_b2_bucket_name
 ALLOWED_ORIGINS=http://localhost:3000
 STORAGE_DIR=storage
 SAMPLE_DOCS_DIR=sample_docs
@@ -211,6 +223,10 @@ GROQ_API_KEY=your_groq_api_key_here
 CHROMA_API_KEY=your_chroma_cloud_api_key
 CHROMA_TENANT=your_chroma_tenant_id
 CHROMA_DATABASE=your_chroma_database_name
+B2_ENDPOINT_URL=https://s3.<region>.backblazeb2.com
+B2_ACCESS_KEY_ID=your_b2_key_id
+B2_SECRET_ACCESS_KEY=your_b2_application_key
+B2_BUCKET_NAME=your_b2_bucket_name
 ALLOWED_ORIGINS=http://localhost:3000
 MAX_FILE_SIZE_MB=20
 STORAGE_DIR=storage
@@ -221,6 +237,7 @@ SAMPLE_DOCS_DIR=sample_docs
 
 Get a free Groq API key at https://console.groq.com -> API Keys -> Create API Key.
 Get free Chroma Cloud credentials at https://trychroma.com -- create a project, then generate an API key from the Settings page.
+Get free Backblaze B2 credentials at https://www.backblaze.com -- create a private bucket, then generate an Application Key scoped to that bucket.
 
 ### Frontend `.env.local`
 
@@ -239,7 +256,7 @@ NEXT_PUBLIC_API_URL=http://localhost:8000
 | POST | `/chat/stream` | Stream response with SSE |
 | GET | `/documents` | List indexed docs (from Postgres) |
 | GET | `/documents/{doc_id}` | Get document metadata (from Postgres) |
-| DELETE | `/documents/{doc_id}` | Delete document (Postgres row + Chroma vectors + files) |
+| DELETE | `/documents/{doc_id}` | Delete document (Postgres row + Chroma vectors + B2 files) |
 | POST | `/documents/{doc_id}/reindex` | Re-index document |
 | GET | `/page-image` | Get rendered page image |
 | GET | `/health` | Service health and Chroma index count |
@@ -258,6 +275,13 @@ NEXT_PUBLIC_API_URL=http://localhost:8000
 - All document metadata (filename, status, classification, chunk count, error messages) is stored in **Postgres**, not flat JSON files
 - A `services/document_repo.py` repository layer mediates all reads/writes -- routers never touch SQLAlchemy directly
 - Postgres tables are auto-created on startup via `init_db()` -- safe to call on every boot
+
+### File Persistence
+
+- Local disk (`storage/uploads/`, `storage/pages/`) is treated as **scratch space only** during processing -- the parser needs local file paths, so files land there first
+- After successful indexing, the original file and all rendered page images are uploaded to **Backblaze B2** (S3-compatible) via `services/object_storage.py`, then deleted from local disk
+- `/page-image` tries B2 first and falls back to local disk, so documents indexed before this migration still work
+- This design means `parser.py` needed no changes -- B2 wraps around the existing local-disk-based parsing logic rather than replacing it
 
 ### Retrieval and Answering
 
@@ -284,9 +308,9 @@ NEXT_PUBLIC_API_URL=http://localhost:8000
 - CORS behavior controlled by environment settings
 
 **Known limitations / what's next (see Roadmap):**
-- File storage (uploads + rendered page images) is still on local disk, which is ephemeral on Render's free tier across redeploys -- planned migration to S3-compatible object storage (Cloudflare R2)
 - No user authentication yet -- all documents are in a single shared namespace
 - In-memory processing-status dict resets on restart (Postgres row remains as source of truth, but live progress percentages are lost mid-upload during a redeploy)
+- Background tasks run synchronously in-process (FastAPI `BackgroundTasks`) rather than via a real job queue -- fine at current scale, but won't survive a server restart mid-job
 
 ## Troubleshooting
 
@@ -321,6 +345,10 @@ Check `chunk_count` for that document via `/documents` or directly in Postgres -
 
 Render's free tier caps at 512MB RAM. Avoid loading heavy ML libraries (`torch`, `sentence-transformers`, `easyocr`) at import time or on startup -- load them lazily on first use, or avoid them entirely (this project uses Chroma's built-in ONNX embedding function instead of `sentence-transformers` for this reason).
 
+### Upload hangs or times out ("the read operation timed out")
+
+This is almost always the ONNX embedding model re-downloading (~80MB from Chroma's CDN) rather than an actual B2/network failure -- check `docker-compose logs backend` for an `onnx.tar.gz` download progress line. In Docker, make sure the `onnx_cache` volume is mounted to `/root/.cache` so the model persists across container rebuilds instead of re-downloading every time. On Render, this download happens once per cold start and is unavoidable on the free tier, but should not repeat on every request.
+
 ## Deployment
 
 This project is deployed across three platforms:
@@ -330,7 +358,7 @@ This project is deployed across three platforms:
 - **Root Directory:** `backend`
 - **Build Command:** `pip install -r requirements.txt`
 - **Start Command:** `uvicorn main:app --host 0.0.0.0 --port $PORT`
-- **Environment variables:** `GROQ_API_KEY`, `CHROMA_API_KEY`, `CHROMA_TENANT`, `CHROMA_DATABASE`, `ALLOWED_ORIGINS`, `DATABASE_URL` (auto-populated by linking a Render Postgres instance)
+- **Environment variables:** `GROQ_API_KEY`, `CHROMA_API_KEY`, `CHROMA_TENANT`, `CHROMA_DATABASE`, `B2_ENDPOINT_URL`, `B2_ACCESS_KEY_ID`, `B2_SECRET_ACCESS_KEY`, `B2_BUCKET_NAME`, `ALLOWED_ORIGINS`, `DATABASE_URL` (auto-populated by linking a Render Postgres instance)
 - A separate **Render PostgreSQL** instance provides `DATABASE_URL` via its Internal Database URL
 
 ### Frontend -> Vercel
@@ -342,13 +370,18 @@ This project is deployed across three platforms:
 
 - Free-tier hosted vector database, shared between local Docker dev and production so indexed documents persist across redeploys and across environments
 
+### File storage -> Backblaze B2
+
+- Free-tier S3-compatible object storage (10GB), shared between local Docker dev and production
+- Original files and rendered page images are written here after successful indexing; local disk is scratch space only
+
 ### Production checklist
 
 - [x] Secrets via environment variables (never committed)
 - [x] Explicit CORS origin handling
 - [x] Persistent vector storage (Chroma Cloud) surviving redeploys
 - [x] Persistent metadata storage (Postgres) surviving redeploys
-- [ ] Persistent file storage (currently local disk -- planned: S3/R2)
+- [x] Persistent file storage (Backblaze B2) surviving redeploys
 - [ ] User authentication and per-user document scoping
 - [ ] Structured logging / error monitoring (e.g. Sentry)
 - [ ] Automated tests + CI
@@ -360,7 +393,7 @@ This project is being actively extended beyond the original assignment scope as 
 - [x] Dockerize backend + frontend, orchestrate with `docker-compose`
 - [x] Migrate vector storage from local ChromaDB to Chroma Cloud
 - [x] Migrate document metadata from JSON files to Postgres (local + Render)
-- [ ] Migrate file storage (uploads, page images) to S3-compatible object storage
+- [x] Migrate file storage (uploads, page images) to Backblaze B2 (S3-compatible)
 - [ ] Add authentication and per-user document scoping
 - [ ] Replace synchronous background tasks with a real job queue (Celery/Redis or `arq`)
 - [ ] Add a retrieval evaluation harness (precision/recall against a labeled Q&A set)
@@ -399,6 +432,8 @@ npm run lint
 - `backend/services/embedder.py` uses Chroma's built-in `ONNXMiniLM_L6_V2` embedding function rather than `sentence-transformers`, specifically to avoid pulling in `torch` (~1.5GB), which does not fit in Render's 512MB free-tier memory limit.
 - `RELEVANCE_THRESHOLD` in `backend/services/rag_agent.py` was empirically retuned after migrating to Chroma Cloud + `chromadb==1.5.9`, since the cosine-distance scale shifted compared to the original local ChromaDB 0.5.x setup. If retrieval quality seems off after a ChromaDB version bump, check this value against real logged distances before assuming a code bug.
 - `backend/routers/upload.py` and `backend/routers/documents.py` are fully migrated to Postgres via `services/document_repo.py`. `backend/create_samples.py` still writes to the legacy JSON metadata format -- it is a standalone seeding script, not part of the live request path, so this inconsistency is tracked but not urgent.
+- File persistence to Backblaze B2 happens in `_persist_to_object_storage()` in `backend/routers/upload.py`, called right after successful indexing. It is best-effort: a B2 failure logs a warning but does not fail the upload, since the document is already indexed and usable from Postgres + Chroma Cloud alone.
+- The ONNX embedding model (~80MB) is downloaded on first use and cached at `/root/.cache/chroma/onnx_models/`. In `docker-compose.yml`, this path is mounted to a named volume (`onnx_cache`) so it persists across container rebuilds -- without this, every `docker-compose up --build` re-downloads the model, which can take several minutes on a slow connection and looks like a hung upload.
 - `frontend/lib/api.ts` is the central API client used by UI components.
 
 ## License

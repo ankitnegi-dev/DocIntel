@@ -10,6 +10,10 @@ File persistence model:
 - After successful processing, the original file and all rendered page images
   are uploaded to object storage (Backblaze B2), then deleted from local disk.
 - This keeps files durable across redeploys without requiring parser.py changes.
+
+Auth model:
+- Upload requires login. Uploaded documents are scoped to the uploading user
+  via user_id on the Document row.
 """
 import os
 import hashlib
@@ -23,13 +27,14 @@ try:
 except ImportError:  # pragma: no cover - optional dependency on Windows
     magic = None
 
-from fastapi import APIRouter, UploadFile, File, HTTPException, BackgroundTasks, Request
+from fastapi import APIRouter, UploadFile, File, HTTPException, BackgroundTasks, Request, Depends
 from fastapi.responses import JSONResponse
 
 from limiter import limiter
 from models.document import DocumentResponse, ProcessingStatus
 from services.document_repo import get_document, upsert_document, list_documents
 from services import object_storage
+from services.auth_deps import get_current_user_required
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -159,7 +164,7 @@ def _persist_to_object_storage(doc_id: str, file_path: Path, page_count: int) ->
             logger.warning(f"Failed to persist page image {page_num} for {doc_id}: {e}")
 
 
-async def _process_document(doc_id: str, file_path: Path, original_filename: str):
+async def _process_document(doc_id: str, file_path: Path, original_filename: str, user_id: Optional[str] = None):
     """
     Background task: parse -> classify -> index -> persist a document.
     Updates processing status throughout.
@@ -211,6 +216,7 @@ async def _process_document(doc_id: str, file_path: Path, original_filename: str
             classification=classification,
             chunk_count=chunk_count,
             error_message=error_msg,
+            user_id=user_id,
         )
         _update_status(
             doc_id,
@@ -238,6 +244,7 @@ async def _process_document(doc_id: str, file_path: Path, original_filename: str
                 file_size=file_path.stat().st_size if file_path.exists() else 0,
                 status="error",
                 error_message=str(e),
+                user_id=user_id,
             )
         except Exception:
             pass
@@ -248,11 +255,13 @@ async def _process_document(doc_id: str, file_path: Path, original_filename: str
 async def upload_document(
     request: Request,
     background_tasks: BackgroundTasks,
-    file: UploadFile = File(...)
+    file: UploadFile = File(...),
+    current_user: dict = Depends(get_current_user_required),
 ):
     """
-    Upload a single document. Returns immediately with doc_id and queued status.
-    Processing happens in background. Poll /status/{doc_id} for updates.
+    Upload a single document. Requires login. Returns immediately with doc_id
+    and queued status. Processing happens in background. Poll /status/{doc_id}
+    for updates.
     """
     content = await file.read()
 
@@ -282,6 +291,7 @@ async def upload_document(
     os.chmod(file_path, 0o600)  # Owner read/write only
 
     original_filename = file.filename or "unknown"
+    user_id = current_user["id"]
 
     # Initialize processing status
     _processing_status[doc_hash] = ProcessingStatus(
@@ -294,7 +304,7 @@ async def upload_document(
 
     # Process in background
     background_tasks.add_task(
-        _process_document, doc_hash, file_path, original_filename
+        _process_document, doc_hash, file_path, original_filename, user_id
     )
 
     return {
@@ -331,12 +341,14 @@ async def get_status(doc_id: str):
 async def bulk_upload(
     request: Request,
     background_tasks: BackgroundTasks,
-    files: list[UploadFile] = File(...)
+    files: list[UploadFile] = File(...),
+    current_user: dict = Depends(get_current_user_required),
 ):
-    """Upload multiple documents at once."""
+    """Upload multiple documents at once. Requires login."""
     if len(files) > 20:
         raise HTTPException(status_code=400, detail="Maximum 20 files per bulk upload")
 
+    user_id = current_user["id"]
     results = []
     for file in files:
         content = await file.read()
@@ -367,7 +379,7 @@ async def bulk_upload(
         )
 
         background_tasks.add_task(
-            _process_document, doc_hash, file_path, original_filename
+            _process_document, doc_hash, file_path, original_filename, user_id
         )
 
         results.append({

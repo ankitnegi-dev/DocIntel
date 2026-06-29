@@ -227,17 +227,24 @@ def _chunk_key(chunk: dict) -> str:
     return f"{chunk.get('doc_id', '')}_{chunk.get('page_num', 0)}_{chunk.get('text', '')[:60]}"
 
 
-def _hybrid_search(query: str, n_fetch: int) -> list[dict]:
+def _hybrid_search(query: str, n_fetch: int, doc_ids: list[str] | None) -> list[dict]:
     """
     Combine vector similarity search and BM25 keyword search via
     Reciprocal Rank Fusion (RRF, k=60). Deduplicates by chunk key.
     Falls back to vector-only if BM25 index is empty.
+
+    If doc_ids is provided, both vector and BM25 results are restricted to
+    those document IDs (auth scoping: public docs + the current user's own docs).
     """
-    vector_results = vector_store.search(query, n_results=n_fetch)
+    vector_results = vector_store.search(query, n_results=n_fetch, doc_ids=doc_ids)
     bm25_results   = bm25_index.search(query, top_k=n_fetch)
 
+    if doc_ids is not None:
+        allowed = set(doc_ids)
+        bm25_results = [c for c in bm25_results if c.get("doc_id") in allowed]
+
     if not bm25_results:
-        return vector_results  # BM25 not populated yet
+        return vector_results  # BM25 not populated yet, or fully filtered out
 
     k = 60  # Standard RRF constant
     rrf_scores: dict[str, float] = {}
@@ -259,13 +266,13 @@ def _hybrid_search(query: str, n_fetch: int) -> list[dict]:
 
     ranked_keys = sorted(rrf_scores, key=lambda k_: rrf_scores[k_], reverse=True)
     merged = [chunk_map[k_] for k_ in ranked_keys[:n_fetch]]
-    logger.debug(f"Hybrid search: {len(vector_results)} vector + {len(bm25_results)} BM25 → {len(merged)} merged")
+    logger.debug(f"Hybrid search: {len(vector_results)} vector + {len(bm25_results)} BM25 -> {len(merged)} merged")
     return merged
 
 
-def _retrieve_and_rerank(query: str, comparison_mode: bool) -> list[dict]:
+def _retrieve_and_rerank(query: str, comparison_mode: bool, doc_ids: list[str] | None) -> list[dict]:
     n_fetch = 12 if comparison_mode else 8
-    chunks = _hybrid_search(query, n_fetch)
+    chunks = _hybrid_search(query, n_fetch, doc_ids)
     logger.info(f"Hybrid search returned {len(chunks)} chunks before threshold filter")
     relevant = [c for c in chunks if c.get("distance", 0) < RELEVANCE_THRESHOLD]
     logger.info(f"After threshold filter ({RELEVANCE_THRESHOLD}): {len(relevant)} chunks remain")
@@ -275,20 +282,26 @@ def _retrieve_and_rerank(query: str, comparison_mode: bool) -> list[dict]:
     return rerank(query, relevant, top_k=top_k)
 
 
-def stream_answer(query: str, history: list[ChatMessage]) -> Generator[str, None, None]:
+def stream_answer(query: str, history: list[ChatMessage], user_id: str | None = None) -> Generator[str, None, None]:
     """
     Generator yielding SSE-formatted data strings.
+    user_id (optional): if provided, retrieval is scoped to that user's own
+    documents plus public/demo documents. If None, retrieval is scoped to
+    public/demo documents only.
     Events:
       {"type":"text","delta":"..."}
       {"type":"done","citations":[...],"follow_ups":[...],"sources_found":bool,"comparison_mode":bool}
       {"type":"error","message":"..."}
     """
+    from services.document_repo import get_visible_doc_ids
+
     query = query[:1000].strip()
     comparison_mode = _is_comparison_query(query)
     if comparison_mode:
         logger.info(f"Comparison mode: {query[:60]}")
 
-    relevant_chunks = _retrieve_and_rerank(query, comparison_mode)
+    doc_ids = get_visible_doc_ids(user_id)
+    relevant_chunks = _retrieve_and_rerank(query, comparison_mode, doc_ids)
 
     if not relevant_chunks:
         logger.info(f"No relevant chunks for: {query[:50]}")
@@ -301,7 +314,6 @@ def stream_answer(query: str, history: list[ChatMessage]) -> Generator[str, None
         prompt = build_rag_prompt(query, relevant_chunks, history, comparison_mode)
         full_text = ""
 
-        # Groq streaming
         stream = client.chat.completions.create(
             model=RAG_MODEL,
             max_tokens=1500 if comparison_mode else 1024,
@@ -329,11 +341,17 @@ def stream_answer(query: str, history: list[ChatMessage]) -> Generator[str, None
         yield f"data: {json.dumps({'type': 'error', 'message': 'Unable to process query. Please ensure GROQ_API_KEY is configured.'})}\n\n"
 
 
-def answer_query(query: str, history: list[ChatMessage]) -> ChatResponse:
-    """Non-streaming RAG (kept for /chat compatibility)."""
+def answer_query(query: str, history: list[ChatMessage], user_id: str | None = None) -> ChatResponse:
+    """
+    Non-streaming RAG (kept for /chat compatibility).
+    user_id (optional): see stream_answer for scoping behavior.
+    """
+    from services.document_repo import get_visible_doc_ids
+
     query = query[:1000].strip()
     comparison_mode = _is_comparison_query(query)
-    relevant_chunks = _retrieve_and_rerank(query, comparison_mode)
+    doc_ids = get_visible_doc_ids(user_id)
+    relevant_chunks = _retrieve_and_rerank(query, comparison_mode, doc_ids)
 
     if not relevant_chunks:
         return ChatResponse(answer=NO_INFO_RESPONSE, citations=[], sources_found=False)

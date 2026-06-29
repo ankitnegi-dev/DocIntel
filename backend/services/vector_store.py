@@ -175,9 +175,11 @@ def index_document(doc_id: str, doc_name: str, pages: list[PageData]) -> int:
     return len(all_chunks)
 
 
-def search(query: str, n_results: int = 5) -> list[dict]:
+def search(query: str, n_results: int = 5, doc_ids: list[str] | None = None) -> list[dict]:
     """
     Search for relevant chunks using cosine similarity.
+    If doc_ids is provided, restricts results to chunks belonging to those documents
+    (used for auth-scoped retrieval — public docs + the current user's own docs).
     Returns list of {text, doc_name, doc_id, page_num, distance}.
     """
     collection = _get_collection()
@@ -185,14 +187,23 @@ def search(query: str, n_results: int = 5) -> list[dict]:
     if collection.count() == 0:
         return []
 
+    if doc_ids is not None and len(doc_ids) == 0:
+        # Caller is scoped but has access to nothing — short-circuit
+        return []
+
     query_embedding = embedder.embed_query(query)
+    where_filter = {"doc_id": {"$in": doc_ids}} if doc_ids is not None else None
 
     try:
-        results = collection.query(
+        query_kwargs = dict(
             query_embeddings=[query_embedding],
             n_results=min(n_results, collection.count()),
-            include=["documents", "metadatas", "distances"]
+            include=["documents", "metadatas", "distances"],
         )
+        if where_filter is not None:
+            query_kwargs["where"] = where_filter
+
+        results = collection.query(**query_kwargs)
 
         chunks = []
         docs = results.get("documents", [[]])[0]

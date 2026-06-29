@@ -3,9 +3,10 @@ Database models — SQLAlchemy ORM.
 Replaces the JSON-file-based metadata storage in storage/metadata/.
 """
 import os
+import uuid
 from datetime import datetime
 from sqlalchemy import (
-    create_engine, Column, String, Integer, DateTime, Text, Boolean, JSON
+    create_engine, Column, String, Integer, DateTime, Text, Boolean, JSON, ForeignKey
 )
 from sqlalchemy.orm import declarative_base, sessionmaker
 
@@ -16,10 +17,20 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 Base = declarative_base()
 
 
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    email = Column(String, unique=True, nullable=False, index=True)
+    password_hash = Column(String, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 class Document(Base):
     __tablename__ = "documents"
 
     doc_id = Column(String, primary_key=True)        # sha256 hash
+    user_id = Column(String, ForeignKey("users.id"), nullable=True)  # NULL = public/demo doc
     filename = Column(String, nullable=False)
     file_ext = Column(String, nullable=False)
     file_size_bytes = Column(Integer, default=0)

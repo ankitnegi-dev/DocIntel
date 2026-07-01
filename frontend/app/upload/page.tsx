@@ -1,13 +1,16 @@
 'use client'
 import { useState, useCallback } from 'react'
+import Link from 'next/link'
 import UploadZone from '@/components/UploadZone'
 import FileProgress, { FileItem } from '@/components/FileProgress'
 import { uploadDocument, getProcessingStatus, getDocumentById } from '@/lib/api'
-import { Layers, CheckCircle2, AlertCircle, Trash2 } from 'lucide-react'
+import { Layers, CheckCircle2, AlertCircle, Trash2, LogIn } from 'lucide-react'
+import { useAuth } from '@/context/AuthContext'
 
 const POLL_INTERVAL = 2000 // 2 seconds
 
 export default function UploadPage() {
+  const { user, isLoading } = useAuth()
   const [files, setFiles] = useState<FileItem[]>([])
   const [isUploading, setIsUploading] = useState(false)
 
@@ -126,6 +129,40 @@ export default function UploadPage() {
   const errorCount = files.filter(f => f.status === 'error').length
   const activeCount = files.filter(f => ['uploading', 'parsing', 'classifying', 'indexing'].includes(f.status)).length
   const doneCount = files.filter(f => ['indexed', 'error'].includes(f.status)).length
+
+  // Wait for auth state to resolve before deciding what to show
+  if (isLoading) {
+    return (
+      <div className="max-w-3xl mx-auto px-4 py-16 text-center text-slate-400">
+        Loading...
+      </div>
+    )
+  }
+
+  // Not logged in — show login prompt instead of the upload UI
+  if (!user) {
+    return (
+      <div className="max-w-md mx-auto px-4 py-16 text-center">
+        <div className="w-14 h-14 rounded-xl bg-blue-100 flex items-center justify-center mx-auto mb-4">
+          <Layers className="w-7 h-7 text-blue-600" />
+        </div>
+        <h1 className="text-xl font-bold text-slate-800 dark:text-white mb-2">
+          Log in to upload documents
+        </h1>
+        <p className="text-slate-500 dark:text-slate-400 text-sm mb-6">
+          Uploaded documents are private to your account. You can still ask questions
+          about the public demo documents from the Chat page without logging in.
+        </p>
+        <Link
+          href="/login"
+          className="inline-flex items-center gap-2 bg-blue-600 hover:bg-blue-500 text-white font-semibold px-6 py-2.5 rounded-lg transition-colors"
+        >
+          <LogIn className="w-4 h-4" />
+          Log in
+        </Link>
+      </div>
+    )
+  }
 
   return (
     <div className="max-w-3xl mx-auto px-4 py-8">

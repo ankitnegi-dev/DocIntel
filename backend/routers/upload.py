@@ -168,12 +168,15 @@ async def upload_document(
         user_id=user_id,
     )
 
-    await enqueue_process_document(
-        doc_id=doc_hash,
-        file_path=str(file_path),
-        original_filename=original_filename,
-        user_id=user_id,
-    )
+    try:
+        await enqueue_process_document(
+            doc_id=doc_hash,
+            file_path=str(file_path),
+            original_filename=original_filename,
+            user_id=user_id,
+        )
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
 
     return {
         "doc_id": doc_hash,
@@ -247,12 +250,20 @@ async def bulk_upload(
             user_id=user_id,
         )
 
-        await enqueue_process_document(
-            doc_id=doc_hash,
-            file_path=str(file_path),
-            original_filename=original_filename,
-            user_id=user_id,
-        )
+        try:
+            await enqueue_process_document(
+                doc_id=doc_hash,
+                file_path=str(file_path),
+                original_filename=original_filename,
+                user_id=user_id,
+            )
+        except RuntimeError as e:
+            results.append({
+                "filename": original_filename,
+                "status": "error",
+                "error": str(e)
+            })
+            continue
 
         results.append({
             "doc_id": doc_hash,

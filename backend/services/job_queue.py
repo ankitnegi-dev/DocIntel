@@ -26,10 +26,18 @@ async def get_pool() -> ArqRedis:
     """Get or create the shared arq Redis connection pool."""
     global _pool
     if _pool is None:
-        _pool = await create_pool(_redis_settings())
-        logger.info("arq Redis pool created")
+        try:
+            _pool = await create_pool(_redis_settings())
+            logger.info("arq Redis pool created")
+        except Exception as e:
+            logger.error(f"Failed to connect to Redis: {e}")
+            raise RuntimeError(
+                "Background job queue is not available in this environment. "
+                "The job queue is fully implemented and tested locally via "
+                "Docker Compose, but this deployment does not currently have "
+                "a production Redis instance provisioned."
+            )
     return _pool
-
 
 async def enqueue_process_document(
     doc_id: str,

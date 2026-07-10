@@ -1,6 +1,6 @@
 'use client'
-import { useState } from 'react'
-import { CheckCircle, XCircle, Loader2, Clock, FileText, RefreshCw, X, ChevronDown, Tag } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
+import { CheckCircle, XCircle, Loader2, FileText, RefreshCw, X, ChevronDown, Tag } from 'lucide-react'
 
 export interface FileItem {
   id: string
@@ -21,20 +21,12 @@ interface FileProgressProps {
   onRemove: (id: string) => void
 }
 
-// Ordered pipeline steps
-const PIPELINE = [
-  { key: 'uploading',   label: 'Upload',   short: '↑' },
-  { key: 'parsing',     label: 'Parse',    short: '🔍' },
-  { key: 'classifying', label: 'Classify', short: '🧠' },
-  { key: 'indexing',    label: 'Index',    short: '🗄' },
-  { key: 'indexed',     label: 'Done',     short: '✓' },
-]
-
-const STAGE_ORDER = ['queued', 'uploading', 'parsing', 'classifying', 'indexing', 'indexed']
-
-function stageIndex(status: string): number {
-  return STAGE_ORDER.indexOf(status)
-}
+// Statuses that mean "actively being handled, no granular stage available".
+// Processing runs in a separate background worker (not the API process), so
+// fine-grained live stages (parsing/classifying/indexing %) aren't tracked
+// here -- only queued -> indexed/error. We show elapsed time instead of a
+// fake stepper so the wait is honest rather than misleading.
+const ACTIVE_STATUSES = ['uploading', 'queued', 'parsing', 'classifying', 'indexing']
 
 function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
@@ -42,45 +34,41 @@ function formatFileSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 
-// Circular ring progress for active files
-function RingProgress({ pct, active, done, error }: { pct: number; active: boolean; done: boolean; error: boolean }) {
+function formatElapsed(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`
+  const m = Math.floor(seconds / 60)
+  const s = seconds % 60
+  return `${m}m ${s}s`
+}
+
+// Circular ring progress. Indeterminate (spinning quarter-arc) while active
+// with no known percentage; solid ring on done/error.
+function RingProgress({ active, done, error }: { active: boolean; done: boolean; error: boolean }) {
   const r = 16
   const circ = 2 * Math.PI * r
-  const fill = error ? 0 : done ? circ : (pct / 100) * circ
+  const arc = circ * 0.25 // quarter-circle arc for the spinner look
 
   return (
-    <svg width="44" height="44" className="flex-shrink-0 -rotate-90">
-      {/* Track */}
-      <circle cx="22" cy="22" r={r} fill="none" strokeWidth="3"
-        className="stroke-slate-200 dark:stroke-slate-700" />
-      {/* Progress */}
-      <circle cx="22" cy="22" r={r} fill="none" strokeWidth="3"
-        strokeLinecap="round"
-        style={{
-          strokeDasharray: circ,
-          strokeDashoffset: circ - fill,
-          transition: 'stroke-dashoffset 0.5s ease',
-        }}
-        className={
-          error ? 'stroke-red-400' :
-          done  ? 'stroke-emerald-500' :
-          active ? 'stroke-blue-500' :
-          'stroke-slate-300 dark:stroke-slate-600'
-        }
-      />
-      {/* Center icon */}
-      <g className="rotate-90" style={{ transformOrigin: '22px 22px' }}>
-        {error ? (
-          <text x="22" y="26" textAnchor="middle" fontSize="12" className="fill-red-500">✕</text>
-        ) : done ? (
-          <text x="22" y="26" textAnchor="middle" fontSize="12" className="fill-emerald-500">✓</text>
-        ) : active ? (
-          <text x="22" y="26" textAnchor="middle" fontSize="10" className="fill-blue-500 font-medium">{pct}%</text>
-        ) : (
-          <text x="22" y="26" textAnchor="middle" fontSize="10" className="fill-slate-400">-</text>
-        )}
-      </g>
-    </svg>
+    <div className={active ? 'animate-spin' : ''} style={{ width: 44, height: 44 }}>
+      <svg width="44" height="44" className="flex-shrink-0 -rotate-90">
+        <circle cx="22" cy="22" r={r} fill="none" strokeWidth="3"
+          className="stroke-slate-200 dark:stroke-slate-700" />
+        <circle cx="22" cy="22" r={r} fill="none" strokeWidth="3"
+          strokeLinecap="round"
+          style={{
+            strokeDasharray: active ? `${arc} ${circ}` : circ,
+            strokeDashoffset: error ? 0 : done ? 0 : active ? 0 : circ,
+            transition: 'stroke-dashoffset 0.5s ease',
+          }}
+          className={
+            error ? 'stroke-red-400' :
+            done  ? 'stroke-emerald-500' :
+            active ? 'stroke-blue-500' :
+            'stroke-slate-300 dark:stroke-slate-600'
+          }
+        />
+      </svg>
+    </div>
   )
 }
 
@@ -131,11 +119,17 @@ function SummaryCard({ item }: { item: FileItem }) {
 }
 
 export default function FileProgress({ files, onRetry, onRemove }: FileProgressProps) {
-  if (files.length === 0) return null
+  // Track when each file entered an "active" state so we can show real
+  // elapsed time instead of a fake progress percentage.
+  const startTimes = useRef<Record<string, number>>({})
+  const [, tick] = useState(0)
 
-  const PROGRESS_MAP: Record<string, number> = {
-    queued: 0, uploading: 20, parsing: 42, classifying: 65, indexing: 85, indexed: 100, error: 0,
-  }
+  useEffect(() => {
+    const interval = setInterval(() => tick(t => t + 1), 1000)
+    return () => clearInterval(interval)
+  }, [])
+
+  if (files.length === 0) return null
 
   return (
     <div className="mt-5 space-y-3">
@@ -157,11 +151,16 @@ export default function FileProgress({ files, onRetry, onRemove }: FileProgressP
       </div>
 
       {files.map((item, fileIdx) => {
-        const isActive = ['uploading', 'parsing', 'classifying', 'indexing'].includes(item.status)
+        const isActive = ACTIVE_STATUSES.includes(item.status)
         const isDone = item.status === 'indexed'
         const isError = item.status === 'error'
-        const pct = PROGRESS_MAP[item.status] || item.progress
-        const currentStageIdx = stageIndex(item.status)
+
+        if (isActive && !startTimes.current[item.id]) {
+          startTimes.current[item.id] = Date.now()
+        }
+        const elapsedSec = startTimes.current[item.id]
+          ? Math.max(0, Math.floor((Date.now() - startTimes.current[item.id]) / 1000))
+          : 0
 
         return (
           <div
@@ -170,10 +169,8 @@ export default function FileProgress({ files, onRetry, onRemove }: FileProgressP
             style={{ animationDelay: `${fileIdx * 60}ms` }}
           >
             <div className="flex items-start gap-3">
-              {/* Ring progress */}
-              <RingProgress pct={pct} active={isActive} done={isDone} error={isError} />
+              <RingProgress active={isActive} done={isDone} error={isError} />
 
-              {/* File info + pipeline */}
               <div className="flex-1 min-w-0">
                 {/* Filename + actions */}
                 <div className="flex items-center justify-between gap-2 mb-2">
@@ -200,58 +197,19 @@ export default function FileProgress({ files, onRetry, onRemove }: FileProgressP
                   </div>
                 </div>
 
-                {/* Pipeline stepper */}
-                {item.status !== 'queued' && !isError && (
-                  <div className="flex items-center gap-0">
-                    {PIPELINE.map((stage, si) => {
-                      const stageI = stageIndex(stage.key)
-                      const completed = currentStageIdx > stageI
-                      const active    = currentStageIdx === stageI
-                      const upcoming  = currentStageIdx < stageI
-
-                      return (
-                        <div key={stage.key} className="flex items-center flex-1">
-                          {/* Node */}
-                          <div className="flex flex-col items-center">
-                            <div className={`
-                              w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold transition-all duration-300
-                              ${completed ? 'bg-emerald-500 text-white shadow-sm shadow-emerald-200 dark:shadow-emerald-900' :
-                                active    ? 'bg-blue-500 text-white shadow-sm shadow-blue-200 dark:shadow-blue-900 ring-2 ring-blue-300 dark:ring-blue-700' :
-                                            'bg-slate-100 dark:bg-slate-700 text-slate-400'}
-                            `}>
-                              {completed ? '✓' : active ? (
-                                <Loader2 className="w-3 h-3 animate-spin" />
-                              ) : stage.short}
-                            </div>
-                            <span className={`text-[9px] mt-0.5 font-medium ${
-                              completed ? 'text-emerald-600 dark:text-emerald-400' :
-                              active    ? 'text-blue-600 dark:text-blue-400' :
-                                          'text-slate-400 dark:text-slate-500'
-                            }`}>
-                              {stage.label}
-                            </span>
-                          </div>
-
-                          {/* Connector (not after last) */}
-                          {si < PIPELINE.length - 1 && (
-                            <div className={`flex-1 h-0.5 mb-3.5 mx-0.5 rounded transition-all duration-500 ${
-                              completed ? 'bg-emerald-400' :
-                              active    ? 'bg-gradient-to-r from-blue-500 to-slate-200 dark:to-slate-600' :
-                                          'bg-slate-200 dark:bg-slate-600'
-                            }`} />
-                          )}
-                        </div>
-                      )
-                    })}
+                {/* Active / processing state — honest elapsed time, no fake stepper */}
+                {isActive && (
+                  <div className="flex items-center gap-1.5 text-xs text-blue-500 dark:text-blue-400">
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <span>
+                      Processing document{elapsedSec > 3 ? ` — ${formatElapsed(elapsedSec)} elapsed` : '…'}
+                    </span>
                   </div>
                 )}
-
-                {/* Queued state */}
-                {item.status === 'queued' && (
-                  <div className="flex items-center gap-1.5 text-xs text-slate-400">
-                    <Clock className="w-3.5 h-3.5" />
-                    Waiting to start…
-                  </div>
+                {isActive && elapsedSec > 20 && (
+                  <p className="text-[11px] text-slate-400 dark:text-slate-500 mt-0.5">
+                    Larger or scanned documents can take a few minutes — parsing, classifying, and indexing happen in the background.
+                  </p>
                 )}
 
                 {/* Error state */}
@@ -263,7 +221,7 @@ export default function FileProgress({ files, onRetry, onRemove }: FileProgressP
                 )}
 
                 {/* Status message */}
-                {item.message && !isError && (
+                {item.message && !isError && !isActive && (
                   <p className="text-xs text-slate-400 dark:text-slate-500 mt-1">{item.message}</p>
                 )}
 

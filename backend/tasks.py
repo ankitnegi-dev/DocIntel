@@ -2,7 +2,7 @@
 Background Tasks
 -----------------
 Job functions run by the arq worker (see worker.py). These must be plain
-async functions — arq serializes their arguments through Redis, so keep
+async functions -- arq serializes their arguments through Redis, so keep
 parameters to simple JSON-safe types (str, int, bool, None).
 """
 import logging
@@ -32,34 +32,9 @@ async def process_document_task(
     from services.classifier import classify_document
     from services.vector_store import index_document
     from services.document_repo import upsert_document
-    from services import object_storage
+    from services.object_storage import persist_document_files
 
     file_path = Path(file_path_str)
-
-    ORIGINALS_PREFIX = "originals/"
-    PAGES_PREFIX = "pages/"
-
-    def _persist_to_object_storage(doc_id: str, file_path: Path, page_count: int) -> None:
-        try:
-            if file_path.exists():
-                content = file_path.read_bytes()
-                key = f"{ORIGINALS_PREFIX}{file_path.name}"
-                object_storage.upload_bytes(key, content)
-                file_path.unlink()
-        except Exception as e:
-            logger.warning(f"Failed to persist original file for {doc_id} to object storage: {e}")
-
-        for page_num in range(1, page_count + 1):
-            local_image = PAGES_DIR / f"{doc_id}_{page_num}.png"
-            if not local_image.exists():
-                continue
-            try:
-                content = local_image.read_bytes()
-                key = f"{PAGES_PREFIX}{doc_id}_{page_num}.png"
-                object_storage.upload_bytes(key, content, content_type="image/png")
-                local_image.unlink()
-            except Exception as e:
-                logger.warning(f"Failed to persist page image {page_num} for {doc_id}: {e}")
 
     try:
         # --- PARSING ---
@@ -83,7 +58,7 @@ async def process_document_task(
         # --- PERSIST FILES TO OBJECT STORAGE ---
         if chunk_count > 0:
             logger.info(f"[{doc_id}] Persisting to object storage...")
-            _persist_to_object_storage(doc_id, file_path, len(pages))
+            persist_document_files(doc_id, file_path, len(pages), PAGES_DIR)
 
         # --- SAVE METADATA (Postgres) ---
         upsert_document(

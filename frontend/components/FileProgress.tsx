@@ -197,12 +197,12 @@ export default function FileProgress({ files, onRetry, onRemove }: FileProgressP
                   </div>
                 </div>
 
-                {/* Active / processing state — honest elapsed time, no fake stepper */}
+                {/* Active / processing state - honest elapsed time, no fake stepper */}
                 {isActive && (
                   <div className="flex items-center gap-1.5 text-xs text-blue-500 dark:text-blue-400">
                     <Loader2 className="w-3.5 h-3.5 animate-spin" />
                     <span>
-                      Processing document{elapsedSec > 3 ? ` — ${formatElapsed(elapsedSec)} elapsed` : '…'}
+                      Processing document{elapsedSec > 3 ? ` - ${formatElapsed(elapsedSec)} elapsed` : '…'}
                     </span>
                   </div>
                 )}

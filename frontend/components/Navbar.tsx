@@ -20,7 +20,7 @@ export default function Navbar() {
         const data = await getDocuments()
         setDocCount(data.total)
       } catch {
-        // Ignore errors — backend may not be ready
+        // Ignore errors - backend may not be ready
       }
     }
     fetchCount()

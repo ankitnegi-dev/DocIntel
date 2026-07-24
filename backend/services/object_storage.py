@@ -94,3 +94,37 @@ def object_exists(key: str) -> bool:
         return True
     except Exception:
         return False
+
+def persist_document_files(doc_id: str, file_path, page_count: int, pages_dir) -> None:
+    """
+    Upload a document's original file and all rendered page images to object
+    storage, then remove the local copies. Best-effort: logs but does not
+    raise on failure, since the document is already indexed and usable even
+    if this durability step fails.
+    Shared by the upload job (tasks.py) and manual reindex (routers/documents.py)
+    so there's one implementation instead of two copies that can drift apart.
+    """
+    from pathlib import Path
+    file_path = Path(file_path)
+    pages_dir = Path(pages_dir)
+
+    try:
+        if file_path.exists():
+            content = file_path.read_bytes()
+            key = f"originals/{file_path.name}"
+            upload_bytes(key, content)
+            file_path.unlink()
+    except Exception as e:
+        logger.warning(f"Failed to persist original file for {doc_id} to object storage: {e}")
+
+    for page_num in range(1, page_count + 1):
+        local_image = pages_dir / f"{doc_id}_{page_num}.png"
+        if not local_image.exists():
+            continue
+        try:
+            content = local_image.read_bytes()
+            key = f"pages/{doc_id}_{page_num}.png"
+            upload_bytes(key, content, content_type="image/png")
+            local_image.unlink()
+        except Exception as e:
+            logger.warning(f"Failed to persist page image {page_num} for {doc_id}: {e}")

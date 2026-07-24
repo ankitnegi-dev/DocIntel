@@ -9,7 +9,7 @@ Retrieval-Augmented Generation agent with:
 - 3 follow-up question suggestions per answer
 
 Design principles:
-- ONLY answers from retrieved evidence — never hallucinate
+- ONLY answers from retrieved evidence - never hallucinate
 - Returns "no information found" if similarity threshold not met
 - Citations include doc_name, page_num, image_path, excerpt, chunk_text
 - Answers formatted in markdown (bullets, bold, headers, tables) for readability
@@ -32,12 +32,12 @@ logger = logging.getLogger(__name__)
 
 PAGES_DIR = Path(__file__).parent.parent / "storage" / "pages"
 
-# Relevance threshold — cosine distance (lower = more similar)
+# Relevance threshold - cosine distance (lower = more similar)
 RELEVANCE_THRESHOLD = 1.6
 
 # Groq models
-RAG_MODEL       = "llama-3.3-70b-versatile"   # Main Q&A — best quality
-FOLLOWUP_MODEL  = "llama-3.1-8b-instant"       # Follow-up suggestions — fast
+RAG_MODEL       = "llama-3.3-70b-versatile"   # Main Q&A - best quality
+FOLLOWUP_MODEL  = "llama-3.1-8b-instant"       # Follow-up suggestions - fast
 
 NO_INFO_RESPONSE = (
     "I could not find relevant information in the uploaded documents "

@@ -3,7 +3,7 @@ arq Worker Settings
 --------------------
 Defines the background job queue worker. Runs as a separate process from
 the FastAPI app (see docker-compose.yml `worker` service), so uploads
-survive API server restarts/redeploys — the job lives in Redis until a
+survive API server restarts/redeploys - the job lives in Redis until a
 worker picks it up, not in the API process's memory.
 """
 import os

@@ -179,7 +179,7 @@ def search(query: str, n_results: int = 5, doc_ids: list[str] | None = None) -> 
     """
     Search for relevant chunks using cosine similarity.
     If doc_ids is provided, restricts results to chunks belonging to those documents
-    (used for auth-scoped retrieval — public docs + the current user's own docs).
+    (used for auth-scoped retrieval - public docs + the current user's own docs).
     Returns list of {text, doc_name, doc_id, page_num, distance}.
     """
     collection = _get_collection()

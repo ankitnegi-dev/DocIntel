@@ -23,8 +23,12 @@ File persistence model:
   are uploaded to object storage (Backblaze B2), then deleted from local disk.
 
 Auth model:
-- Upload requires login. Uploaded documents are scoped to the uploading user
-  via user_id on the Document row.
+- Upload requires login.
+- Content is deduplicated by SHA-256 hash across ALL users: if identical
+  content is already indexed (by anyone), no reprocessing happens -- the
+  new uploader is granted access via DocumentAccess instead, so they get
+  their own listable/deletable entry without wasting Groq/Chroma/B2 calls
+  or being silently unable to see content someone else already uploaded.
 """
 import os
 import hashlib
@@ -42,7 +46,7 @@ from fastapi.responses import JSONResponse
 
 from limiter import limiter
 from models.document import DocumentResponse, ProcessingStatus
-from services.document_repo import get_document, upsert_document, list_documents
+from services.document_repo import get_document, upsert_document, list_documents, grant_document_access
 from services.job_queue import enqueue_process_document
 from services.auth_deps import get_current_user_required
 
@@ -120,6 +124,26 @@ def _validate_file(file: UploadFile, content: bytes) -> None:
             logger.warning(f"Potentially malicious PDF uploaded: {file.filename}")
 
 
+def _handle_dedup(doc_hash: str, user_id: str) -> Optional[dict]:
+    """
+    If this content is already indexed (by anyone), grant the current user
+    access to it instead of reprocessing. Returns a response dict if this was
+    a dedup hit, or None if the caller should proceed with a fresh upload.
+    """
+    existing = get_document(doc_hash)
+    if existing and existing.get("status") == "indexed":
+        grant_document_access(doc_hash, user_id)
+        return {
+            "doc_id": doc_hash,
+            "filename": existing["original_filename"],
+            "page_count": existing["page_count"],
+            "classification": existing.get("classification", {}),
+            "status": "indexed",
+            "message": "Document content already indexed -- linked to your account"
+        }
+    return None
+
+
 @router.post("/upload")
 @limiter.limit("10/hour")
 async def upload_document(
@@ -141,22 +165,16 @@ async def upload_document(
     safe_filename = f"{doc_hash}{ext}"
     file_path = UPLOADS_DIR / safe_filename
 
-    existing = get_document(doc_hash)
-    if existing and existing.get("status") == "indexed":
-        return {
-            "doc_id": doc_hash,
-            "filename": existing["original_filename"],
-            "page_count": existing["page_count"],
-            "classification": existing.get("classification", {}),
-            "status": "indexed",
-            "message": "Document already indexed"
-        }
+    user_id = current_user["id"]
+
+    dedup_response = _handle_dedup(doc_hash, user_id)
+    if dedup_response is not None:
+        return dedup_response
 
     file_path.write_bytes(content)
     os.chmod(file_path, 0o600)
 
     original_filename = file.filename or "unknown"
-    user_id = current_user["id"]
 
     # Create a "queued" row immediately so /status has something to read
     upsert_document(
@@ -235,11 +253,21 @@ async def bulk_upload(
 
         doc_hash = hashlib.sha256(content).hexdigest()
         ext = Path(file.filename or "file").suffix.lower()
+        original_filename = file.filename or "unknown"
+
+        dedup_response = _handle_dedup(doc_hash, user_id)
+        if dedup_response is not None:
+            results.append({
+                "doc_id": doc_hash,
+                "filename": original_filename,
+                "status": "indexed",
+                "message": dedup_response["message"],
+            })
+            continue
+
         file_path = UPLOADS_DIR / f"{doc_hash}{ext}"
         file_path.write_bytes(content)
         os.chmod(file_path, 0o600)
-
-        original_filename = file.filename or "unknown"
 
         upsert_document(
             doc_id=doc_hash,

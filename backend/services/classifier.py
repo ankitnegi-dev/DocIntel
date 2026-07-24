@@ -51,7 +51,7 @@ def build_classification_prompt(pages: list[PageData]) -> str:
     has_ocr = any(p.extraction_method == "ocr" for p in pages)
     total_pages = len(pages)
 
-    prompt = f"""You are a document classification expert. Analyze the document excerpt below and return ONLY a valid JSON object — no markdown fences, no explanation.
+    prompt = f"""You are a document classification expert. Analyze the document excerpt below and return ONLY a valid JSON object - no markdown fences, no explanation.
 
 Document excerpt:
 ---

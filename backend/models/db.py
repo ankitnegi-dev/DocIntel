@@ -1,12 +1,12 @@
 """
-Database models — SQLAlchemy ORM.
+Database models - SQLAlchemy ORM.
 Replaces the JSON-file-based metadata storage in storage/metadata/.
 """
 import os
 import uuid
 from datetime import datetime
 from sqlalchemy import (
-    create_engine, Column, String, Integer, DateTime, Text, Boolean, JSON, ForeignKey
+    create_engine, Column, String, Integer, DateTime, Text, Boolean, JSON, ForeignKey, UniqueConstraint
 )
 from sqlalchemy.orm import declarative_base, sessionmaker
 
@@ -41,6 +41,19 @@ class Document(Base):
     chunk_count = Column(Integer, default=0)
     uploaded_at = Column(DateTime, default=datetime.utcnow)
     indexed_at = Column(DateTime, nullable=True)
+
+
+class DocumentAccess(Base):
+    __tablename__ = "document_access"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    doc_id = Column(String, ForeignKey("documents.doc_id"), nullable=False, index=True)
+    user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
+    granted_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("doc_id", "user_id", name="uq_document_access_doc_user"),
+    )
 
 
 def init_db():

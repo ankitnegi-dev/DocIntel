@@ -1,5 +1,5 @@
 """
-Document Intelligence + Agentic RAG — FastAPI Backend
+Document Intelligence + Agentic RAG - FastAPI Backend
 ======================================================
 Security: CORS, rate limiting, MIME validation, hashed filenames.
 Note: Auto-indexing disabled at startup to stay within Render free tier memory limits.

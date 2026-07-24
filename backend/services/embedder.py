@@ -2,7 +2,7 @@
 Embedder Service
 ----------------
 Uses ChromaDB's built-in ONNXRuntime embedding function.
-No torch required — stays within Render free tier memory limits.
+No torch required - stays within Render free tier memory limits.
 """
 import logging
 

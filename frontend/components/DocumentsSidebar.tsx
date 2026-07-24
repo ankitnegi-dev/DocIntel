@@ -68,7 +68,7 @@ export default function DocumentsSidebar({ isOpen, onToggle }: Props) {
       await deleteDocument(docId)
       setDocs(prev => prev.filter(d => d.doc_id !== docId))
     } catch {
-      setError('Delete failed — please try again')
+      setError('Delete failed - please try again')
     } finally {
       setDeletingId(null)
     }

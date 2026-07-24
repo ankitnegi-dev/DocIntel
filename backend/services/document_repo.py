@@ -2,13 +2,23 @@
 Document Repository
 --------------------
 Postgres-backed replacement for the old storage/metadata/*.json files.
-Falls back gracefully if DATABASE_URL isn't set (shouldn't happen in prod).
+
+Access model:
+- Document.user_id records who originally uploaded/created the content (informational).
+- DocumentAccess is the actual permission table: a row means that user can see/query
+  that document. Public/demo documents (Document.user_id IS NULL) are visible to
+  everyone regardless of DocumentAccess rows.
+- This separation exists so that identical content uploaded by different users can
+  share the same underlying Chroma vectors / B2 files (deduped by content hash)
+  while each user still gets their own private, listable, deletable entry.
 """
 import logging
 from datetime import datetime
 from typing import Optional
 
-from models.db import get_session, Document, User
+from sqlalchemy.exc import IntegrityError
+
+from models.db import get_session, Document, User, DocumentAccess
 from services.auth import hash_password
 
 logger = logging.getLogger(__name__)
@@ -53,10 +63,17 @@ def upsert_document(
     error_message: str | None = None,
     user_id: str | None = None,
 ) -> None:
-    """Insert or update a document record. user_id=None means a public/demo document."""
+    """
+    Insert or update a document's content/status record. user_id=None means a
+    public/demo document. On first creation with a user_id, that user is also
+    granted access (see DocumentAccess). Re-uploads of already-existing content
+    by a *different* user should call grant_document_access() separately
+    (see upload.py's dedup path) rather than relying on this function to do it.
+    """
     session = get_session()
     try:
         doc = session.get(Document, doc_id)
+        is_new = doc is None
         if doc is None:
             doc = Document(doc_id=doc_id, filename=filename, file_ext=file_ext, user_id=user_id)
             session.add(doc)
@@ -76,6 +93,9 @@ def upsert_document(
         if status == "indexed" and doc.indexed_at is None:
             doc.indexed_at = datetime.utcnow()
 
+        if is_new and user_id is not None:
+            session.add(DocumentAccess(doc_id=doc_id, user_id=user_id))
+
         session.commit()
     except Exception as e:
         logger.error(f"upsert_document failed for {doc_id}: {e}")
@@ -88,18 +108,22 @@ def upsert_document(
 def list_documents(user_id: str | None = None) -> list[dict]:
     """
     Return document records, most recent first.
-    If user_id is given: returns that user's documents PLUS public (user_id IS NULL) documents.
+    If user_id is given: returns public documents PLUS documents that user has
+    been granted access to (whether they uploaded the original or a deduped
+    re-upload of identical content).
     If user_id is None: returns only public documents (anonymous/demo view).
     """
     session = get_session()
     try:
-        query = session.query(Document)
         if user_id is not None:
-            query = query.filter(
-                (Document.user_id == user_id) | (Document.user_id.is_(None))
+            accessible_ids = session.query(DocumentAccess.doc_id).filter(
+                DocumentAccess.user_id == user_id
+            ).subquery()
+            query = session.query(Document).filter(
+                (Document.user_id.is_(None)) | (Document.doc_id.in_(accessible_ids))
             )
         else:
-            query = query.filter(Document.user_id.is_(None))
+            query = session.query(Document).filter(Document.user_id.is_(None))
 
         docs = query.order_by(Document.uploaded_at.desc()).all()
         return [
@@ -119,22 +143,113 @@ def list_documents(user_id: str | None = None) -> list[dict]:
         session.close()
 
 
-
 def get_visible_doc_ids(user_id: str | None = None) -> list[str]:
     """
     Return doc_ids visible to the caller: public docs (user_id IS NULL)
-    plus the given user's own docs, if any.
+    plus docs the given user has been granted access to.
     """
     session = get_session()
     try:
-        query = session.query(Document.doc_id)
         if user_id is not None:
-            query = query.filter(
-                (Document.user_id == user_id) | (Document.user_id.is_(None))
+            accessible_ids = session.query(DocumentAccess.doc_id).filter(
+                DocumentAccess.user_id == user_id
+            ).subquery()
+            query = session.query(Document.doc_id).filter(
+                (Document.user_id.is_(None)) | (Document.doc_id.in_(accessible_ids))
             )
         else:
-            query = query.filter(Document.user_id.is_(None))
+            query = session.query(Document.doc_id).filter(Document.user_id.is_(None))
         return [row[0] for row in query.all()]
+    finally:
+        session.close()
+
+
+def user_has_access(doc_id: str, user_id: str) -> bool:
+    """True if the document is public, or the user has an explicit access grant."""
+    session = get_session()
+    try:
+        doc = session.get(Document, doc_id)
+        if doc is None:
+            return False
+        if doc.user_id is None:
+            return True
+        access = session.query(DocumentAccess).filter(
+            DocumentAccess.doc_id == doc_id, DocumentAccess.user_id == user_id
+        ).first()
+        return access is not None
+    finally:
+        session.close()
+
+
+def grant_document_access(doc_id: str, user_id: str) -> None:
+    """
+    Grant a user access to an already-indexed document (used on dedup: identical
+    content already exists, so no reprocessing happens, but the new uploader
+    still gets their own visible/deletable entry). Idempotent.
+    """
+    session = get_session()
+    try:
+        existing = session.query(DocumentAccess).filter(
+            DocumentAccess.doc_id == doc_id, DocumentAccess.user_id == user_id
+        ).first()
+        if existing is not None:
+            return
+        session.add(DocumentAccess(doc_id=doc_id, user_id=user_id))
+        session.commit()
+    except IntegrityError:
+        # Race: another request granted it concurrently -- fine, already exists.
+        session.rollback()
+    except Exception as e:
+        logger.error(f"grant_document_access failed for {doc_id}/{user_id}: {e}")
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+def revoke_document_access(doc_id: str, user_id: str) -> int:
+    """
+    Revoke a user's access to a document. Returns the number of remaining
+    access holders after revocation, so the caller can decide whether the
+    underlying content (Chroma vectors, B2 files, Postgres row) should be
+    fully purged (0 remaining) or left in place for other users.
+    """
+    session = get_session()
+    try:
+        access = session.query(DocumentAccess).filter(
+            DocumentAccess.doc_id == doc_id, DocumentAccess.user_id == user_id
+        ).first()
+        if access is not None:
+            session.delete(access)
+            session.commit()
+
+        remaining = session.query(DocumentAccess).filter(
+            DocumentAccess.doc_id == doc_id
+        ).count()
+        return remaining
+    except Exception as e:
+        logger.error(f"revoke_document_access failed for {doc_id}/{user_id}: {e}")
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+def delete_document_row(doc_id: str) -> None:
+    """Delete the Document row itself (and its access rows via cascade at the DB
+    level if configured, or explicitly here). Call only when no access holders
+    remain and the document isn't public."""
+    session = get_session()
+    try:
+        session.query(DocumentAccess).filter(DocumentAccess.doc_id == doc_id).delete()
+        doc = session.get(Document, doc_id)
+        if doc:
+            session.delete(doc)
+        session.commit()
+    except Exception as e:
+        logger.error(f"delete_document_row failed for {doc_id}: {e}")
+        session.rollback()
+        raise
     finally:
         session.close()
 

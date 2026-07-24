@@ -139,7 +139,7 @@ export default function UploadPage() {
     )
   }
 
-  // Not logged in — show login prompt instead of the upload UI
+  // Not logged in - show login prompt instead of the upload UI
   if (!user) {
     return (
       <div className="max-w-md mx-auto px-4 py-16 text-center">

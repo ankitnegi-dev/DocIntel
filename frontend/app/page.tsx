@@ -9,7 +9,7 @@ const FEATURES = [
     bg: 'bg-blue-50 dark:bg-blue-900/20',
     border: 'border-blue-100 dark:border-blue-800',
     title: 'Intelligent Parsing',
-    desc: 'Digital PDFs, scanned docs (OCR), and text files — tables extracted to markdown automatically.',
+    desc: 'Digital PDFs, scanned docs (OCR), and text files - tables extracted to markdown automatically.',
   },
   {
     icon: Brain,
@@ -17,7 +17,7 @@ const FEATURES = [
     bg: 'bg-purple-50 dark:bg-purple-900/20',
     border: 'border-purple-100 dark:border-purple-800',
     title: 'Auto Classification',
-    desc: 'Claude Haiku classifies every document — type, domain, sensitivity, entities, and a one-line summary.',
+    desc: 'Claude Haiku classifies every document - type, domain, sensitivity, entities, and a one-line summary.',
   },
   {
     icon: Search,
@@ -30,7 +30,7 @@ const FEATURES = [
 ]
 
 const STEPS = [
-  { step: '01', icon: FileText, label: 'Upload', desc: 'Drop PDFs or text files — up to 20 MB each' },
+  { step: '01', icon: FileText, label: 'Upload', desc: 'Drop PDFs or text files - up to 20 MB each' },
   { step: '02', icon: Layers, label: 'Index', desc: 'Parsed, classified, embedded & stored in ChromaDB' },
   { step: '03', icon: Brain, label: 'Ask', desc: 'Natural-language Q&A with streamed, cited answers' },
 ]
